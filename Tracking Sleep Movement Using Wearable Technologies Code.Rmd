@@ -1,0 +1,494 @@
+---
+title: "Untitled"
+author: "Elizabeth Chin"
+date: "2024-05-29"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+________________________________________________________________________________
+
+```{r}
+# Load necessary libraries
+library(tidyverse)
+library(lubridate)
+library(pscl)
+library(ggplot2)
+library(zoo)
+library(WaveletComp)
+library(fields)
+
+# Load the data
+data <- read.csv("/Users/li_li/downloads/qbs_126_final_proj/merged_sleep_data.csv")
+
+# Convert timestamp to a datetime object
+data$timestamp <- ymd_hms(data$timestamp)
+
+# Drop rows with missing timestamp values
+data <- data %>% drop_na(timestamp)
+
+# Create a relative time variable
+data <- data %>%
+  group_by(Subject_ID) %>%
+  mutate(relative_time = row_number()) %>%
+  ungroup()
+
+# Create a continuous time variable
+data <- data %>%
+  mutate(continuous_time = as.numeric(difftime(timestamp, min(timestamp), units = "mins")))
+
+# Function to handle missing data
+fill_missing_data <- function(df) {
+  for (col in colnames(df)) {
+    if (any(is.na(df[[col]]))) {
+      if (is.numeric(df[[col]])) {
+        if (all(df[[col]] == round(df[[col]], 0), na.rm = TRUE)) {
+          # For count data
+          zero_inflated_model <- tryCatch(
+            zeroinfl(df[[col]] ~ 1 | 1, data = df, dist = "negbin"),
+            error = function(e) NULL
+          )
+          if (!is.null(zero_inflated_model)) {
+            missing_indices <- which(is.na(df[[col]]))
+            predicted_values <- predict(zero_inflated_model, type = "response")[missing_indices]
+            df[[col]][missing_indices] <- round(predicted_values)
+          }
+        } else {
+          # For continuous data
+          df[[col]] <- na.approx(df[[col]], rule = 2)  # Linear interpolation
+        }
+      }
+    }
+  }
+  return(df)
+}
+
+# Fill missing data for each feature
+data <- data %>%
+  group_by(Subject_ID) %>%
+  nest() %>%
+  mutate(data = map(data, fill_missing_data)) %>%
+  unnest(cols = c(data))
+
+# Visualize the trajectory for activity counts and ENMO variable for each subject
+ggplot(data, aes(x = continuous_time)) +
+  geom_line(aes(y = Actiwatch.activity.counts, color = "Activity Counts")) +
+  geom_line(aes(y = Apple.Watch.ENMO, color = "ENMO")) +
+  facet_wrap(~ Subject_ID, scales = "free_y") +
+  labs(title = "Trajectory of Activity Counts and ENMO",
+       x = "Time (minutes)",
+       y = "Value",
+       color = "Variable") +
+  theme_minimal()
+
+# Spectral analysis, raw periodogram, and wavelet analysis
+analyze_oscillations <- function(subject_data) {
+  subject_id <- unique(subject_data$Subject_ID)
+  
+  # Ensure no missing values in the data for spectral analysis
+  activity_counts <- na.omit(subject_data$Actiwatch.activity.counts)
+  
+  # Check if there are enough data points to perform the analysis
+  if (length(activity_counts) < 2) {
+    return(tibble(
+      subject_id = subject_id,
+      spec_freq = list(NULL),
+      spec_spec = list(NULL),
+      periodogram = list(NULL),
+      wavelet_result = list(NULL)
+    ))
+  }
+  
+  # Spectral Analysis
+  spec <- spectrum(activity_counts, plot = FALSE)
+  
+  # Raw Periodogram
+  periodogram <- spec$spec
+  
+  # Wavelet Analysis using WaveletComp
+  wavelet_result <- analyze.wavelet(data.frame(time = 1:length(activity_counts), value = activity_counts), "value",
+                                    loess.span = 0, dt = 1, dj = 1/12, lowerPeriod = 1, upperPeriod = 128, make.pval = FALSE)
+  
+  tibble(
+    subject_id = subject_id,
+    spec_freq = list(spec$freq),
+    spec_spec = list(spec$spec),
+    periodogram = list(periodogram),
+    wavelet_result = list(wavelet_result)
+  )
+}
+
+# Apply analysis to each subject
+results <- data %>%
+  group_by(Subject_ID) %>%
+  nest() %>%
+  mutate(analysis = map(data, analyze_oscillations)) %>%
+  unnest(cols = c(analysis))
+
+# Plot results
+par(mfrow = c(3, 1))
+for (i in seq_along(results$Subject_ID)) {
+  subject_id <- results$Subject_ID[i]
+  spec_freq <- results$spec_freq[[i]]
+  spec_spec <- results$spec_spec[[i]]
+  periodogram <- results$periodogram[[i]]
+  wavelet_result <- results$wavelet_result[[i]]
+  
+  if (!is.null(spec_freq)) {
+    plot(spec_freq, spec_spec, type = "l", main = paste("Spectral Analysis - Subject", subject_id),
+         xlab = "Frequency", ylab = "Spectral Density")
+    plot(periodogram, type = "l", main = paste("Periodogram - Subject", subject_id),
+         xlab = "Frequency", ylab = "Power")
+    
+    wt.image(wavelet_result, main = paste("Wavelet Analysis - Subject", subject_id),
+             legend.params = list(lab = "Power"))
+  } else {
+    plot.new()
+    title(main = paste("Insufficient Data - Subject", subject_id))
+  }
+}
+
+
+```
+
+________________________________________________________________________________
+
+
+```{r}
+# Load necessary libraries
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(pscl)
+library(zoo)
+library(WaveletComp)
+
+# Load the CSV file
+data <- read.csv("/Users/li_li/downloads/qbs_126_final_proj/merged_sleep_data.csv")
+
+# Display the first few rows of the data to understand its structure
+head(data)
+
+```
+
+
+```{r}
+# Create relative time variable
+data <- data %>%
+  mutate(timestamp = ymd_hms(timestamp),
+         relative_time = as.integer(difftime(timestamp, min(timestamp, na.rm = TRUE), units = "secs")) + 1)
+
+# Create continuous time variable
+data <- data %>%
+  mutate(continuous_time = as.numeric(difftime(timestamp, min(timestamp, na.rm = TRUE), units = "secs")))
+
+# Drop rows with missing timestamp values
+data <- data %>%
+  drop_na(timestamp)
+
+```
+
+
+```{r}
+# Fill missing data using zero-inflated model
+for (col in names(data)) {
+  if (any(is.na(data[[col]]))) {
+    model <- zeroinfl(data[[col]] ~ 1, dist = "poisson")
+    predicted_values <- predict(model, type = "response")
+    data[[col]][is.na(data[[col]])] <- predicted_values[is.na(data[[col]])]
+  }
+}
+
+```
+
+
+```{r}
+# Plot trajectories for activity counts and ENMO variable for each subject separately
+ggplot(data, aes(x = relative_time, y = activity_counts, color = factor(subject_id))) +
+  geom_line() +
+  labs(title = "Activity Counts Trajectories", x = "Relative Time", y = "Activity Counts") +
+  theme_minimal()
+
+ggplot(data, aes(x = relative_time, y = ENMO, color = factor(subject_id))) +
+  geom_line() +
+  labs(title = "ENMO Variable Trajectories", x = "Relative Time", y = "ENMO") +
+  theme_minimal()
+
+```
+
+
+```{r}
+# Spectral analysis using raw periodogram
+periodogram_activity <- spec.pgram(data$activity_counts, taper = 0, log = "no")
+periodogram_ENMO <- spec.pgram(data$ENMO, taper = 0, log = "no")
+
+# Wavelet analysis
+wavelet_activity <- analyze.wavelet(data, "activity_counts", loess.span = 0)
+wavelet_ENMO <- analyze.wavelet(data, "ENMO", loess.span = 0)
+
+# Plot wavelet analysis
+wt.image(wavelet_activity, main = "Wavelet Analysis - Activity Counts")
+wt.image(wavelet_ENMO, main = "Wavelet Analysis - ENMO")
+
+```
+
+
+
+
+________________________________________________________________________________
+
+
+Use zero-inflated model only for variables with zeros.
+Use median imputation for other variables.
+
+
+```{r}
+# Load necessary libraries
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(pscl)
+library(zoo)
+library(WaveletComp)
+
+# Load the CSV file
+data <- read.csv("/Users/li_li/downloads/qbs_126_final_proj/merged_sleep_data.csv")
+
+# Display the first few rows and the column names of the data to understand its structure
+head(data)
+print(names(data))
+
+# Identify problematic timestamps
+problematic_timestamps <- data %>%
+  filter(is.na(ymd_hms(timestamp))) %>%
+  select(timestamp)
+
+print(problematic_timestamps)
+
+# Remove rows with problematic timestamps
+data <- data %>%
+  filter(!is.na(ymd_hms(timestamp)))
+
+# Proceed with creating relative and continuous time variables
+data <- data %>%
+  mutate(timestamp = ymd_hms(timestamp),
+         relative_time = as.integer(difftime(timestamp, min(timestamp, na.rm = TRUE), units = "secs")) + 1,
+         continuous_time = as.numeric(difftime(timestamp, min(timestamp, na.rm = TRUE), units = "secs")))
+
+# Drop rows with missing timestamp values
+data <- data %>%
+  drop_na(timestamp)
+
+# Fill missing data
+for (col in names(data)) {
+  if (any(is.na(data[[col]]))) {
+    if (any(data[[col]] == 0, na.rm = TRUE)) {
+      model <- zeroinfl(data[[col]] ~ 1, dist = "poisson")
+      predicted_values <- predict(model, type = "response")
+      data[[col]][is.na(data[[col]])] <- predicted_values[is.na(data[[col]])]
+    } else {
+      median_value <- median(data[[col]], na.rm = TRUE)
+      data[[col]][is.na(data[[col]])] <- median_value
+    }
+  }
+}
+
+# Correct column names for plotting if necessary
+activity_counts_column <- "Actiwatch.activity.counts" # Change this to the correct column name if different
+ENMO_column <- "Apple.Watch.ENMO" # Change this to the correct column name if different
+subject_id_column <- "Subject_ID" # Change this to the correct column name if different
+
+# Plot trajectories for activity counts and ENMO variable for each subject separately
+ggplot(data, aes_string(x = "relative_time", y = activity_counts_column, color = subject_id_column)) +
+  geom_line() +
+  labs(title = "Activity Counts Trajectories", x = "Relative Time", y = "Activity Counts") +
+  theme_minimal()
+
+ggplot(data, aes_string(x = "relative_time", y = ENMO_column, color = subject_id_column)) +
+  geom_line() +
+  labs(title = "ENMO Variable Trajectories", x = "Relative Time", y = "ENMO") +
+  theme_minimal()
+
+# Spectral analysis using raw periodogram
+periodogram_activity <- spec.pgram(data[[activity_counts_column]], taper = 0, log = "no")
+periodogram_ENMO <- spec.pgram(data[[ENMO_column]], taper = 0, log = "no")
+
+# Wavelet analysis
+wavelet_activity <- analyze.wavelet(data, activity_counts_column, loess.span = 0)
+wavelet_ENMO <- analyze.wavelet(data, ENMO_column, loess.span = 0)
+
+# Plot wavelet analysis
+wt.image(wavelet_activity, main = "Wavelet Analysis - Activity Counts")
+wt.image(wavelet_ENMO, main = "Wavelet Analysis - ENMO")
+
+
+```
+
+
+
+________________________________________________________________________________
+
+```{r}
+# Load necessary libraries
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(pscl)
+library(zoo)
+library(WaveletComp)
+
+# Load the CSV file
+data <- read.csv("/Users/li_li/downloads/qbs_126_final_proj/merged_sleep_data.csv")
+
+# Display the first few rows and the column names of the data to understand its structure
+head(data)
+print(names(data))
+
+# Identify problematic timestamps
+problematic_timestamps <- data %>%
+  filter(is.na(ymd_hms(timestamp))) %>%
+  select(timestamp)
+
+print(problematic_timestamps)
+
+# Remove rows with problematic timestamps
+data <- data %>%
+  filter(!is.na(ymd_hms(timestamp)))
+
+# Proceed with creating relative and continuous time variables
+data <- data %>%
+  mutate(timestamp = ymd_hms(timestamp),
+         relative_time = as.integer(difftime(timestamp, min(timestamp, na.rm = TRUE), units = "secs")) + 1,
+         continuous_time = as.numeric(difftime(timestamp, min(timestamp, na.rm = TRUE), units = "secs")))
+
+# Drop rows with missing timestamp values
+data <- data %>%
+  drop_na(timestamp)
+
+# Fill missing data
+for (col in names(data)) {
+  if (any(is.na(data[[col]]))) {
+    if (any(data[[col]] == 0, na.rm = TRUE)) {
+      model <- zeroinfl(data[[col]] ~ 1, dist = "poisson")
+      predicted_values <- predict(model, type = "response")
+      data[[col]][is.na(data[[col]])] <- predicted_values[is.na(data[[col]])]
+    } else {
+      median_value <- median(data[[col]], na.rm = TRUE)
+      data[[col]][is.na(data[[col]])] <- median_value
+    }
+  }
+}
+
+# Correct column names for plotting if necessary
+activity_counts_column <- "Actiwatch.activity.counts" # Change this to the correct column name if different
+ENMO_column <- "Apple.Watch.ENMO" # Change this to the correct column name if different
+subject_id_column <- "Subject_ID" # Change this to the correct column name if different
+
+# Convert subject_id to factor
+data <- data %>%
+  mutate(!!sym(subject_id_column) := as.factor(!!sym(subject_id_column)))
+
+# Generate a distinct color palette for subjects
+subject_colors <- scale_color_manual(values = scales::hue_pal()(length(unique(data[[subject_id_column]]))))
+
+# Plot trajectories for activity counts and ENMO variable for each subject separately
+ggplot(data, aes_string(x = "relative_time", y = activity_counts_column, color = subject_id_column)) +
+  geom_line() +
+  labs(title = "Activity Counts Trajectories", x = "Relative Time", y = "Activity Counts") +
+  theme_minimal() +
+  subject_colors
+
+ggplot(data, aes_string(x = "relative_time", y = ENMO_column, color = subject_id_column)) +
+  geom_line() +
+  labs(title = "ENMO Variable Trajectories", x = "Relative Time", y = "ENMO") +
+  theme_minimal() +
+  subject_colors
+
+# Spectral analysis and wavelet analysis for each subject_id
+unique_subjects <- unique(data[[subject_id_column]])
+
+for (subject in unique_subjects) {
+  subject_data <- data %>% filter(!!sym(subject_id_column) == subject)
+  
+  # Spectral analysis using raw periodogram
+  periodogram_activity <- spec.pgram(subject_data[[activity_counts_column]], taper = 0, log = "no")
+  periodogram_ENMO <- spec.pgram(subject_data[[ENMO_column]], taper = 0, log = "no")
+  
+  # Wavelet analysis
+  wavelet_activity <- analyze.wavelet(subject_data, activity_counts_column, loess.span = 0)
+  wavelet_ENMO <- analyze.wavelet(subject_data, ENMO_column, loess.span = 0)
+  
+  # Plot wavelet analysis
+  wt.image(wavelet_activity, main = paste("Wavelet Analysis - Activity Counts (Subject ID:", subject, ")"))
+  wt.image(wavelet_ENMO, main = paste("Wavelet Analysis - ENMO (Subject ID:", subject, ")"))
+}
+
+```
+
+
+________________________________________________________________________________
+
+
+```{r, results='hide'}
+# First we need to make sure that the necessary packages are installed
+# Specify the packages that will be necessary here
+necessarypackages=c("mgcv","mlVAR","ggplot2") 
+
+# Check the names of the current packages that are installed
+currentpackagenames=rownames(installed.packages()) 
+
+# Select the packages which are not yet installed
+packagestoinstall=necessarypackages[!(necessarypackages%in%currentpackagenames)] 
+
+# If packages are not yet installed, install them via CRAN. 
+if(length(packagestoinstall)>0){ 
+  install.packages(packagestoinstall)
+}
+
+# Now load all packages using lapply
+packageout=lapply(necessarypackages, library, character.only = TRUE)
+```
+
+
+```{r}
+library(vars)
+# Estimate the relationship between v1 and v2 using the mlVAR function
+fit1 <- mlVAR(data, vars = c("Actiwatch.activity.counts","Apple.Watch.ENMO"), idvar = "Subject_ID", lags = 1, temporal = "correlated", contemporaneous = "correlated", estimator="lmer")
+# Display the summary of the fit
+summary(fit1)
+```
+
+
+```{r}
+# Plot the lagged associations of fit1
+plot(fit1,"temporal",layout = "circle",nonsig="hide")
+title("Lagged Associations")
+```
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(stats)
+library(biwavelet)
+
+# Combine data from all subjects for spectral analysis
+combined_activity_counts <- na.omit(data$Actiwatch.activity.counts)
+combined_ENMO <- na.omit(data$Apple.Watch.ENMO)
+
+# Spectral analysis using raw periodogram
+periodogram_activity <- spec.pgram(combined_activity_counts, taper = 0, log = "no")
+periodogram_ENMO <- spec.pgram(combined_ENMO, taper = 0, log = "no")
+
+# Plot periodogram for combined data
+plot(periodogram_activity, main = "Periodogram - Combined Activity Counts")
+plot(periodogram_ENMO, main = "Periodogram - Combined ENMO")
+```
+
+
+
+
